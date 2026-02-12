@@ -13,7 +13,7 @@ export interface PiConfig {
     workingDirectory: string;
     autoRestart: boolean;
     maxRestartAttempts: number;
-    toolCallDisplay: 'text' | 'hidden';
+    additionalArgs: string[];
 }
 
 /**

@@ -3,6 +3,7 @@
  */
 
 import * as vscode from 'vscode';
+import { debug } from './debug.js';
 
 /**
  * Extract the last user message from VS Code chat history
@@ -64,7 +65,7 @@ export function extractLastUserMessage(
  * Example: "pi:anthropic:claude-sonnet-4-20250514"
  */
 export function parseModelId(modelId: string): { provider: string; modelId: string } {
-    console.log('[parseModelId] Input:', modelId);
+    debug('[parseModelId] Input:', modelId);
     
     const parts = modelId.split(':');
     
@@ -82,6 +83,6 @@ export function parseModelId(modelId: string): { provider: string; modelId: stri
         modelId: parts.slice(2).join(':'), // Handle model IDs with colons
     };
     
-    console.log('[parseModelId] Result:', result);
+    debug('[parseModelId] Result:', result);
     return result;
 }

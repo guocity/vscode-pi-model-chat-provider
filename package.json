@@ -1,9 +1,27 @@
 {
   "name": "vscode-pi-model-chat-provider",
-  "displayName": "Pi Language Model Provider",
-  "description": "Use Pi coding agent as a language model provider in VS Code",
+  "displayName": "Pi Coding Agent - Language Model Provider",
+  "description": "Use Pi Coding Agent directly from Copilot Chat via VS Code's Language Model Provider API",
   "version": "0.1.0",
-  "publisher": "pi-model-provider",
+  "publisher": "tintinweb",
+  "preview": true,
+  "icon": "images/pi-logo-black.png",
+  "author": {
+    "name": "tintinweb"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tintinweb/vscode-pi-model-chat-provider.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tintinweb/vscode-pi-model-chat-provider/issues"
+  },
+  "homepage": "https://github.com/tintinweb/vscode-pi-model-chat-provider#readme",
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
   "type": "module",
   "engines": {
     "vscode": "^1.103.0"
@@ -13,28 +31,35 @@
     "Chat"
   ],
   "keywords": [
-    "ai",
-    "language-model",
     "pi",
+    "pi-coding-agent",
+    "coding-agent",
+    "autonomous-agent",
+    "language-model",
+    "language-model-provider",
+    "ai",
     "chat",
-    "copilot"
+    "copilot",
+    "vscode-lm"
   ],
   "activationEvents": [
     "onLanguageModelChatProvider:pi"
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "icons": {
+      "pi-logo": {
+        "description": "Pi logo icon",
+        "default": {
+          "fontPath": "images/pi-logo.woff",
+          "fontCharacter": "\\e900"
+        }
+      }
+    },
     "languageModelChatProviders": [
       {
         "vendor": "pi",
-        "displayName": "Pi Coding Agent",
-        "managementCommand": "pi.configure"
-      }
-    ],
-    "commands": [
-      {
-        "command": "pi.configure",
-        "title": "Pi: Configure API Keys & Settings"
+        "displayName": "Pi Coding Agent"
       }
     ],
     "configuration": {
@@ -60,15 +85,18 @@
           "default": 3,
           "description": "Maximum number of restart attempts before giving up"
         },
-        "pi.toolCallDisplay": {
-          "type": "string",
-          "default": "text",
-          "enum": ["text", "hidden"],
-          "enumDescriptions": [
-            "Show tool execution as text annotations",
-            "Hide tool execution details"
-          ],
-          "description": "How to display Pi's tool execution in chat"
+        "pi.additionalArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional command-line arguments to pass to Pi CLI"
+        },
+        "pi.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable debug logging for Pi extension"
         }
       }
     }
@@ -77,7 +105,9 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "package": "vsce package",
+    "publish": "vsce publish"
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.52.0"

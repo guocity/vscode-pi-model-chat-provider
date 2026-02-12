@@ -1,6 +1,20 @@
-# Pi Language Model Provider for VS Code
+<p align="center">
+  <img src="https://github.com/tintinweb/vscode-pi-model-chat-provider/raw/master/images/banner.png" alt="Pi Banner">
+</p>
 
-Integrate [Pi coding agent](https://github.com/badlogic/pi-mono) as a Language Model Chat Provider in VS Code, making Pi's LLM access available through VS Code's model picker for GitHub Copilot and any extension consuming `vscode.lm.*` APIs.
+# Pi Coding Agent - Language Model Provider for VS Code
+
+[![Visual Studio Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/tintinweb.vscode-pi-model-chat-provider?style=flat-square&label=VS%20Marketplace&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=tintinweb.vscode-pi-model-chat-provider)
+[![Installs](https://img.shields.io/visual-studio-marketplace/i/tintinweb.vscode-pi-model-chat-provider?style=flat-square)](https://marketplace.visualstudio.com/items?itemName=tintinweb.vscode-pi-model-chat-provider)
+[![Rating](https://img.shields.io/visual-studio-marketplace/r/tintinweb.vscode-pi-model-chat-provider?style=flat-square)](https://marketplace.visualstudio.com/items?itemName=tintinweb.vscode-pi-model-chat-provider)
+
+VS Code Language Model Chat Provider integration for [Mario Zechner's](https://github.com/badlogic) open source [Pi coding agent](https://pi.dev), making Pi models available in VS Code's model picker for use with GitHub Copilot Chat and any extension that consumes the `vscode.lm.*` APIs.
+
+<p align="center">
+  <img src="https://github.com/tintinweb/vscode-pi-model-chat-provider/raw/master/images/demo.png" alt="Pi Banner">
+</p>
+
+https://github.com/user-attachments/assets/196cffa2-660e-4b7e-911b-389830420579
 
 ## Features
 
@@ -19,9 +33,7 @@ Integrate [Pi coding agent](https://github.com/badlogic/pi-mono) as a Language M
 
 2. **API Keys** configured via Pi:
    ```bash
-   pi auth add anthropic YOUR_ANTHROPIC_KEY
-   pi auth add openai YOUR_OPENAI_KEY
-   # etc.
+   pi> /login
    ```
 
 ## Installation
@@ -40,7 +52,8 @@ Access settings via `Ctrl/Cmd+,` and search for "Pi":
 | `pi.workingDirectory` | Working directory for Pi agent | Workspace root |
 | `pi.autoRestart` | Auto-restart on crash | `true` |
 | `pi.maxRestartAttempts` | Max restart attempts | `3` |
-| `pi.toolCallDisplay` | How to display tool execution | `text` |
+| `pi.additionalArgs` | Additional CLI arguments | `[]` |
+| `pi.debug` | Enable debug logging | `false` |
 
 ## Usage
 
@@ -80,16 +93,24 @@ which pi
 npm install -g @mariozechner/pi-coding-agent
 ```
 
-### "API key not configured"
-
-Configure your API keys:
-```bash
-pi auth add anthropic YOUR_KEY
-```
-
 ### Check Logs
 
 Open the Output panel (`Ctrl/Cmd+Shift+U`) and select "Pi Agent" from the dropdown to view logs.
+
+### Enable Debug Logging
+
+For detailed troubleshooting, enable debug mode:
+
+1. Open Settings (`Ctrl/Cmd+,`)
+2. Search for "Pi: Debug"
+3. Check the box to enable
+
+Or add to `settings.json`:
+```json
+{
+  "pi.debug": true
+}
+```
 
 ## Development
 
@@ -109,13 +130,6 @@ npm run watch
 npx @vscode/vsce package
 ```
 
-## Roadmap
-
-- [x] MVP: Fresh session per request
-- [ ] Persistent sessions for multi-turn context
-- [ ] VS Code `SecretStorage` for API keys
-- [ ] Structured tool call display
-- [ ] Image input support
 
 ## License
 

@@ -52,7 +52,7 @@ export class PiBridge {
                                vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || 
                                process.cwd();
 
-            const args = ['--mode', 'rpc', '--no-session'];
+            const args = ['--mode', 'rpc', '--no-session', ...this.config.additionalArgs];
 
             this.process = spawn(this.config.binaryPath, args, {
                 cwd: workingDir,
@@ -218,9 +218,11 @@ export class PiBridge {
         // Subscribe to events
         const unsubscribe = this.onEvent(options.onEvent);
 
-        // Handle cancellation
+        // Handle cancellation - need to track if cancelled for promise rejection
+        let isCancelled = false;
         const cancellationListener = options.token.onCancellationRequested(() => {
             this.outputChannel.appendLine('Request cancelled, aborting...');
+            isCancelled = true;
             this.send('abort').catch((err: unknown) => {
                 this.outputChannel.appendLine(`Error aborting: ${err}`);
             });
@@ -239,7 +241,13 @@ export class PiBridge {
                         completed = true;
                         if (completionTimeout) clearTimeout(completionTimeout);
                         if (completionUnsubscribe) completionUnsubscribe();
-                        resolve();
+                        
+                        // Check if operation was cancelled
+                        if (isCancelled) {
+                            reject(new Error('Operation cancelled by user'));
+                        } else {
+                            resolve();
+                        }
                     }
                 };
                 
@@ -280,6 +288,53 @@ export class PiBridge {
         } finally {
             unsubscribe();
             cancellationListener.dispose();
+        }
+    }
+
+    /**
+     * Start a new session (reset conversation context)
+     */
+    async newSession(): Promise<void> {
+        await this.ensureStarted();
+        try {
+            await this.send('new_session');
+            this.outputChannel.appendLine('[PiBridge] Started new session');
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.outputChannel.appendLine(`Failed to start new session: ${errorMessage}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Get session statistics (token usage, cost)
+     */
+    async getSessionStats(): Promise<any> {
+        await this.ensureStarted();
+        try {
+            const response = await this.send('get_session_stats');
+            this.outputChannel.appendLine(`get_session_stats response: ${JSON.stringify(response)}`);
+            return response || {};
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.outputChannel.appendLine(`Failed to get session stats: ${errorMessage}`);
+            return {};
+        }
+    }
+
+    /**
+     * Get session state (model, settings, streaming status)
+     */
+    async getState(): Promise<any> {
+        await this.ensureStarted();
+        try {
+            const response = await this.send('get_state');
+            this.outputChannel.appendLine(`get_state response: ${JSON.stringify(response)}`);
+            return response || {};
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.outputChannel.appendLine(`Failed to get state: ${errorMessage}`);
+            return {};
         }
     }
 
@@ -349,7 +404,17 @@ export class PiBridge {
         }
 
         if (this.process) {
-            this.process.kill();
+            // Try graceful shutdown first
+            this.process.kill('SIGTERM');
+            
+            // Wait a bit for graceful shutdown
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            // Force kill if still running
+            if (!this.process.killed) {
+                this.process.kill('SIGKILL');
+            }
+            
             this.process = null;
         }
 

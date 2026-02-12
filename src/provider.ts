@@ -3,16 +3,16 @@
  */
 
 import * as vscode from 'vscode';
-import type { PiBridge } from './pi-bridge.js';
-import { extractLastUserMessage } from './message-converter.js';
+import type { SessionPool } from './session-pool.js';
 import type { AgentEvent } from '@mariozechner/pi-agent-core';
+import { debug } from './debug.js';
 
 export class PiChatProvider implements vscode.LanguageModelChatProvider {
     // Store mapping of model ID -> provider for lookup
     private modelProviderMap = new Map<string, string>();
 
     constructor(
-        private bridge: PiBridge
+        private pool: SessionPool
     ) {}
 
     /**
@@ -23,7 +23,9 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
         _token: vscode.CancellationToken
     ): Promise<vscode.LanguageModelChatInformation[]> {
         try {
-            const models = await this.bridge.getAvailableModels();
+            // Get models from a temporary bridge (just to query available models)
+            // We don't use the pool here since this is just querying capabilities
+            const models = await this.pool.getAvailableModels();
             
             // Safety check
             if (!models || !Array.isArray(models)) {
@@ -31,7 +33,7 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
                 return [];
             }
 
-            return models.map((model: { id: string; provider: string; contextWindow: number }) => {
+            return models.map((model: { id: string; provider: string; contextWindow: number; maxTokens: number }) => {
                 // Use colon separator to avoid conflicts with dashes in provider names
                 // Format: "provider:model-id" (e.g., "github-copilot:grok-code-fast-1")
                 const modelId = `${model.provider}:${model.id}`;
@@ -44,11 +46,11 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
 
                 const modelInfo = {
                     id: modelId,
-                    name: `pi/ ${model.provider}/${model.id}`,
+                    name: `pi /${model.provider}/${model.id}`,
                     family,
                     version: model.id,
                     maxInputTokens: model.contextWindow,
-                    maxOutputTokens: 16384,
+                    maxOutputTokens: model.maxTokens || 16384, // Use model's maxTokens, fallback to 16384
                     tooltip: 'Pi Coding Agent with tool-calling capabilities',
                     detail: `Autonomous agent using ${model.provider} models`,
                     capabilities: {
@@ -56,7 +58,7 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
                     }
                 } satisfies vscode.LanguageModelChatInformation;
 
-                console.log('[Pi Provider] Registering model:', { id: modelId, provider: model.provider, modelId: model.id });
+                debug('[Pi Provider] Registering model:', { id: modelId, provider: model.provider, modelId: model.id });
                 return modelInfo;
             });
         } catch (error) {
@@ -77,8 +79,8 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
         token: vscode.CancellationToken
     ): Promise<void> {
         // Debug logging
-        console.log('[Pi Provider] ========================================');
-        console.log('[Pi Provider] Received request for model:', {
+        debug('[Pi Provider] ========================================');
+        debug('[Pi Provider] Received request for model:', {
             id: model.id,
             name: model.name,
             family: model.family,
@@ -93,7 +95,7 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
         if (modelId.includes('/')) {
             const parts = modelId.split('/');
             modelId = parts.slice(1).join('/');
-            console.log('[Pi Provider] Stripped vendor prefix, model ID:', modelId);
+            debug('[Pi Provider] Stripped vendor prefix, model ID:', modelId);
         }
         
         // Look up provider from our map (we stored it during registration)
@@ -119,23 +121,75 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
             provider: provider,
             modelId: modelId.substring(colonIndex + 1)
         };
-        console.log('[Pi Provider] Parsed model:', parsedModel);
+        debug('[Pi Provider] Parsed model:', parsedModel);
 
-        // Extract prompt from message history
-        const prompt = extractLastUserMessage(messages);
+        // Get or create session for this conversation
+        let result;
+        try {
+            result = await this.pool.getOrCreate(messages, modelId);
+        } catch (error) {
+            // Handle context-only messages (no user query) gracefully
+            if (error instanceof Error && error.message.includes('No messages with text content')) {
+                debug('[Pi Provider] Context-only message received (no <user_query>) - skipping');
+                return; // Silently skip - VS Code will send the actual query in next call
+            }
+            throw error;
+        }
+        
+        const { bridge, isNew, newMessages } = result;
+        
+        debug('[Pi Provider] Session state:', { isNew, messageCount: newMessages.length });
 
         // Event handler for streaming
         const onEvent = (event: AgentEvent) => {
             this.handleEvent(event, progress);
         };
 
-        // Send prompt and stream response
-        await this.bridge.sendPrompt({
-            prompt,
-            model: parsedModel,
-            onEvent,
-            token
-        });
+        try {
+            // Send messages (all for new session, only new message for continuation)
+            debug('[Pi Provider] Sending messages to Pi:', {
+                count: newMessages.length,
+                messages: newMessages.map(msg => ({ 
+                    length: msg.length, 
+                    preview: msg.substring(0, 100) 
+                }))
+            });
+
+            for (const message of newMessages) {
+                // Check if user clicked stop button
+                if (token.isCancellationRequested) {
+                    debug('[Pi Provider] Cancellation requested, stopping message loop');
+                    return;
+                }
+
+                debug('[Pi Provider] Sending message to Pi:', {
+                    length: message.length,
+                    preview: message.substring(0, 200)
+                });
+
+                await bridge.sendPrompt({
+                    prompt: message,
+                    model: parsedModel,
+                    onEvent,
+                    token
+                });
+            }
+
+            // Update status bar with latest stats (skip if cancelled)
+            if (!token.isCancellationRequested) {
+                debug('[Pi Provider] Calling updateStatusBar...');
+                await this.pool.updateStatusBar(bridge);
+                debug('[Pi Provider] updateStatusBar completed');
+            }
+        } catch (error) {
+            // Check if error is due to cancellation
+            if (error instanceof Error && error.message.includes('cancelled')) {
+                debug('[Pi Provider] Request cancelled by user');
+                return; // Gracefully exit without throwing
+            }
+            // Re-throw other errors
+            throw error;
+        }
     }
 
     /**
@@ -161,15 +215,15 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
         event: AgentEvent,
         progress: vscode.Progress<vscode.LanguageModelResponsePart>
     ): void {
-        console.log('[Pi Provider] Event received:', event.type, event);
+        debug('[Pi Provider] Event received:', event.type, event);
         
         if (event.type === 'message_update') {
             const { assistantMessageEvent } = event;
-            console.log('[Pi Provider] assistantMessageEvent:', assistantMessageEvent);
+            debug('[Pi Provider] assistantMessageEvent:', assistantMessageEvent);
 
             // Stream text deltas
             if (assistantMessageEvent.type === 'text_delta') {
-                console.log('[Pi Provider] Text delta:', assistantMessageEvent.delta);
+                debug('[Pi Provider] Text delta:', assistantMessageEvent.delta);
                 progress.report(
                     new vscode.LanguageModelTextPart(assistantMessageEvent.delta)
                 );
@@ -185,7 +239,7 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
 
         // Display tool calls using VS Code's native tool visualization
         if (event.type === 'tool_execution_start') {
-            console.log('[Pi Provider] Tool execution start:', event.toolName, event.args);
+            debug('[Pi Provider] Tool execution start:', event.toolName, event.args);
             progress.report(
                 new vscode.LanguageModelToolCallPart(
                     event.toolCallId,
@@ -196,7 +250,7 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
         }
 
         if (event.type === 'tool_execution_end') {
-            console.log('[Pi Provider] Tool execution end:', event.toolName, event.isError ? 'error' : 'success');
+            debug('[Pi Provider] Tool execution end:', event.toolName, event.isError ? 'error' : 'success');
             
             // Extract and display tool result text
             if (event.result?.content && Array.isArray(event.result.content)) {

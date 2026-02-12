@@ -4,40 +4,33 @@
  */
 
 import * as vscode from 'vscode';
-import { PiBridge } from './pi-bridge.js';
+import { SessionPool } from './session-pool.js';
 import { PiChatProvider } from './provider.js';
 import type { PiConfig } from './types.js';
+import { debug } from './debug.js';
 
-let bridge: PiBridge | undefined;
+let pool: SessionPool | undefined;
 
 /**
  * Extension activation
  */
 export function activate(context: vscode.ExtensionContext): void {
-    console.log('Pi Language Model Provider extension activating...');
+    debug('Pi Language Model Provider extension activating...');
 
     // Load configuration
     const config = loadConfiguration();
+    const maxSessions = vscode.workspace.getConfiguration('pi').get<number>('maxSessions', 20);
+    const sessionIdleTimeout = vscode.workspace.getConfiguration('pi').get<number>('sessionIdleTimeout', 600);
 
-    // Create Pi bridge
-    bridge = new PiBridge(config);
+    // Create session pool
+    pool = new SessionPool(config, maxSessions, sessionIdleTimeout * 1000);
 
     // Create provider
-    const provider = new PiChatProvider(bridge);
+    const provider = new PiChatProvider(pool);
 
     // Register language model chat provider
     context.subscriptions.push(
         vscode.lm.registerLanguageModelChatProvider('pi', provider)
-    );
-
-    // Register configuration command
-    context.subscriptions.push(
-        vscode.commands.registerCommand('pi.configure', async () => {
-            await vscode.commands.executeCommand(
-                'workbench.action.openSettings',
-                'pi'
-            );
-        })
     );
 
     // Watch for configuration changes
@@ -45,39 +38,45 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.workspace.onDidChangeConfiguration(async (e) => {
             if (e.affectsConfiguration('pi')) {
                 const newConfig = loadConfiguration();
+                const newMaxSessions = vscode.workspace.getConfiguration('pi').get<number>('maxSessions', 20);
+                const newIdleTimeout = vscode.workspace.getConfiguration('pi').get<number>('sessionIdleTimeout', 600);
                 
-                // Restart bridge with new configuration
-                if (bridge) {
-                    await bridge.shutdown();
+                // Dispose old pool and create new one
+                if (pool) {
+                    await pool.dispose();
                 }
-                bridge = new PiBridge(newConfig);
+                pool = new SessionPool(newConfig, newMaxSessions, newIdleTimeout * 1000);
                 
                 vscode.window.showInformationMessage(
-                    'Pi configuration updated. Agent will restart on next request.'
+                    'Pi configuration updated. New sessions will use updated settings.'
                 );
             }
         })
     );
 
-    // Add bridge to subscriptions for cleanup
+    // Add pool to subscriptions for cleanup
+    // Note: subscriptions don't await async, so we rely on deactivate() for proper cleanup
     context.subscriptions.push({
-        dispose: () => bridge?.dispose()
+        dispose: () => {
+            // Fire-and-forget cleanup as fallback
+            pool?.dispose().catch(console.error);
+        }
     });
 
-    console.log('Pi Language Model Provider extension activated');
+    debug('Pi Language Model Provider extension activated');
 }
 
 /**
  * Extension deactivation
  */
 export async function deactivate(): Promise<void> {
-    console.log('Pi Language Model Provider extension deactivating...');
+    debug('Pi Language Model Provider extension deactivating...');
     
-    if (bridge) {
-        await bridge.shutdown();
+    if (pool) {
+        await pool.dispose();
     }
     
-    console.log('Pi Language Model Provider extension deactivated');
+    debug('Pi Language Model Provider extension deactivated');
 }
 
 /**
@@ -91,6 +90,6 @@ function loadConfiguration(): PiConfig {
         workingDirectory: config.get<string>('workingDirectory') || '',
         autoRestart: config.get<boolean>('autoRestart') ?? true,
         maxRestartAttempts: config.get<number>('maxRestartAttempts') ?? 3,
-        toolCallDisplay: config.get<'text' | 'hidden'>('toolCallDisplay') || 'text',
+        additionalArgs: config.get<string[]>('additionalArgs') || [],
     };
 }
