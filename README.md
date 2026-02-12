@@ -5,8 +5,6 @@
 # Pi Coding Agent - Language Model Provider for VS Code
 
 [![Visual Studio Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/tintinweb.vscode-pi-model-chat-provider?style=flat-square&label=VS%20Marketplace&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=tintinweb.vscode-pi-model-chat-provider)
-[![Installs](https://img.shields.io/visual-studio-marketplace/i/tintinweb.vscode-pi-model-chat-provider?style=flat-square)](https://marketplace.visualstudio.com/items?itemName=tintinweb.vscode-pi-model-chat-provider)
-[![Rating](https://img.shields.io/visual-studio-marketplace/r/tintinweb.vscode-pi-model-chat-provider?style=flat-square)](https://marketplace.visualstudio.com/items?itemName=tintinweb.vscode-pi-model-chat-provider)
 
 VS Code Language Model Chat Provider integration for [Mario Zechner's](https://github.com/badlogic) open source [Pi coding agent](https://pi.dev), making Pi models available in VS Code's model picker for use with GitHub Copilot Chat and any extension that consumes the `vscode.lm.*` APIs.
 
