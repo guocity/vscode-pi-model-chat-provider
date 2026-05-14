@@ -1,10 +1,11 @@
 .vscode/**
 .vscode-test/**
+.claude/**
+.pi/**
 node_modules/**
 src/**
 docs/**
 .gitignore
-.yarnrc
 esbuild.js
 vsc-extension-quickstart.md
 **/tsconfig.json
@@ -12,5 +13,8 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 **/.vscode-test.*
+*.vsix
 images/demo.png
 images/banner.png
+images/icon.png
+images/logo.svg
