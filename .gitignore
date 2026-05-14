@@ -1,7 +1,22 @@
-out
-dist
-node_modules
+# Build output
+out/
+dist/
+
+# Dependencies
+node_modules/
+
+# VS Code extension test/package artifacts
 .vscode-test/
 *.vsix
+
+# Editor / tooling
+.vscode/settings.json
+.claude/
+.pi/
+
+# OS files
+.DS_Store
+
+# Internal docs / planning
 docs/
 PLAN.md

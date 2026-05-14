@@ -3,7 +3,7 @@
  */
 
 import type { CancellationToken } from 'vscode';
-import type { AgentEvent } from '@mariozechner/pi-agent-core';
+import type { AgentEvent } from '@earendil-works/pi-agent-core';
 
 /**
  * Configuration for Pi agent

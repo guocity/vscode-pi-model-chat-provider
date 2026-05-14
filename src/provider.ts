@@ -4,7 +4,7 @@
 
 import * as vscode from 'vscode';
 import type { SessionPool } from './session-pool.js';
-import type { AgentEvent } from '@mariozechner/pi-agent-core';
+import type { AgentEvent } from '@earendil-works/pi-agent-core';
 import { debug } from './debug.js';
 
 export class PiChatProvider implements vscode.LanguageModelChatProvider {
@@ -130,57 +130,65 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
         } catch (error) {
             // Handle context-only messages (no user query) gracefully
             if (error instanceof Error && error.message.includes('No messages with text content')) {
-                debug('[Pi Provider] Context-only message received (no <user_query>) - skipping');
+                debug('[Pi Provider] Message batch had no text content - skipping');
                 return; // Silently skip - VS Code will send the actual query in next call
             }
             throw error;
         }
         
-        const { bridge, isNew, newMessages } = result;
-        
-        debug('[Pi Provider] Session state:', { isNew, messageCount: newMessages.length });
+        const { bridge, isNew, newPrompt } = result;
 
-        // Event handler for streaming
-        const onEvent = (event: AgentEvent) => {
-            this.handleEvent(event, progress);
-        };
+        debug('[Pi Provider] Session state:', { isNew, promptLength: newPrompt.length });
+
+        // Event handler for streaming (stateful per request)
+        const handler = this.createEventHandler(progress);
 
         try {
-            // Send messages (all for new session, only new message for continuation)
-            debug('[Pi Provider] Sending messages to Pi:', {
-                count: newMessages.length,
-                messages: newMessages.map(msg => ({ 
-                    length: msg.length, 
-                    preview: msg.substring(0, 100) 
-                }))
+            if (token.isCancellationRequested) {
+                debug('[Pi Provider] Cancellation requested before send');
+                return;
+            }
+
+            debug('[Pi Provider] Sending prompt to Pi:', {
+                length: newPrompt.length,
+                preview: newPrompt.substring(0, 200)
             });
 
-            for (const message of newMessages) {
-                // Check if user clicked stop button
-                if (token.isCancellationRequested) {
-                    debug('[Pi Provider] Cancellation requested, stopping message loop');
-                    return;
+            await bridge.sendPrompt({
+                prompt: newPrompt,
+                model: parsedModel,
+                onEvent: handler.onEvent,
+                token
+            });
+
+            if (token.isCancellationRequested) {
+                return;
+            }
+
+            // Pi's RPC mode does not stream text deltas, so fetch the completed
+            // answer once the agent is done. `get_last_assistant_text` is
+            // model-agnostic - it works regardless of how a model structures
+            // its content blocks.
+            if (!handler.state.streamedText) {
+                const text = await bridge.getLastAssistantText();
+                if (text) {
+                    progress.report(new vscode.LanguageModelTextPart(text));
+                } else if (!handler.state.reportedToolActivity) {
+                    // Nothing came back at all - surface why, instead of
+                    // letting VS Code show a bare "no response returned".
+                    throw new Error(
+                        handler.state.agentError
+                            ? `Pi agent error: ${handler.state.agentError}`
+                            : 'Pi agent finished without producing any response. ' +
+                              'Check the "Pi Agent" output channel for details.'
+                    );
                 }
-
-                debug('[Pi Provider] Sending message to Pi:', {
-                    length: message.length,
-                    preview: message.substring(0, 200)
-                });
-
-                await bridge.sendPrompt({
-                    prompt: message,
-                    model: parsedModel,
-                    onEvent,
-                    token
-                });
             }
 
-            // Update status bar with latest stats (skip if cancelled)
-            if (!token.isCancellationRequested) {
-                debug('[Pi Provider] Calling updateStatusBar...');
-                await this.pool.updateStatusBar(bridge);
-                debug('[Pi Provider] updateStatusBar completed');
-            }
+            // Refresh the status bar in the background. The response is already
+            // fully reported, so don't make VS Code wait on these extra RPC
+            // round-trips before the turn is considered complete.
+            void this.pool.updateStatusBar(bridge);
         } catch (error) {
             // Check if error is due to cancellation
             if (error instanceof Error && error.message.includes('cancelled')) {
@@ -209,61 +217,110 @@ export class PiChatProvider implements vscode.LanguageModelChatProvider {
     }
 
     /**
-     * Handle Pi events and map to VS Code progress reports
+     * Build a stateful event handler for a single request.
+     *
+     * Pi's RPC mode emits `message_start` / `message_end` but not incremental
+     * `message_update` / `text_delta` events, so the response text is fetched
+     * after completion via `get_last_assistant_text` (see the caller) rather
+     * than reconstructed from events here. This handler forwards live tool
+     * activity, streams deltas if a future Pi version emits them, and records
+     * any agent-side error so the caller can surface it.
      */
-    private handleEvent(
-        event: AgentEvent,
+    private createEventHandler(
         progress: vscode.Progress<vscode.LanguageModelResponsePart>
-    ): void {
-        debug('[Pi Provider] Event received:', event.type, event);
-        
-        if (event.type === 'message_update') {
-            const { assistantMessageEvent } = event;
-            debug('[Pi Provider] assistantMessageEvent:', assistantMessageEvent);
+    ): {
+        onEvent: (event: AgentEvent) => void;
+        state: { streamedText: boolean; reportedToolActivity: boolean; agentError?: string };
+    } {
+        const state: {
+            streamedText: boolean;
+            reportedToolActivity: boolean;
+            agentError?: string;
+        } = { streamedText: false, reportedToolActivity: false };
 
-            // Stream text deltas
-            if (assistantMessageEvent.type === 'text_delta') {
-                debug('[Pi Provider] Text delta:', assistantMessageEvent.delta);
-                progress.report(
-                    new vscode.LanguageModelTextPart(assistantMessageEvent.delta)
-                );
-            }
+        const onEvent = (event: AgentEvent): void => {
+            debug('[Pi Provider] Event received:', event.type);
 
-            // Optionally stream thinking (if enabled in future)
-            // if (assistantMessageEvent.type === 'thinking_delta') {
-            //     progress.report(
-            //         new vscode.LanguageModelTextPart(`[Thinking: ${assistantMessageEvent.delta}]`)
-            //     );
-            // }
-        }
-
-        // Display tool calls using VS Code's native tool visualization
-        if (event.type === 'tool_execution_start') {
-            debug('[Pi Provider] Tool execution start:', event.toolName, event.args);
-            progress.report(
-                new vscode.LanguageModelToolCallPart(
-                    event.toolCallId,
-                    event.toolName,
-                    event.args
-                )
-            );
-        }
-
-        if (event.type === 'tool_execution_end') {
-            debug('[Pi Provider] Tool execution end:', event.toolName, event.isError ? 'error' : 'success');
-            
-            // Extract and display tool result text
-            if (event.result?.content && Array.isArray(event.result.content)) {
-                const resultText = event.result.content
-                    .filter((c: any) => c.type === 'text')
-                    .map((c: any) => c.text)
-                    .join('\n');
-                
-                if (resultText) {
-                    progress.report(new vscode.LanguageModelTextPart(resultText));
+            // Incremental streaming - only if a future Pi version emits it.
+            if (event.type === 'message_update') {
+                const { assistantMessageEvent } = event;
+                if (assistantMessageEvent.type === 'text_delta') {
+                    state.streamedText = true;
+                    progress.report(
+                        new vscode.LanguageModelTextPart(assistantMessageEvent.delta)
+                    );
                 }
             }
+
+            // Record any agent-side error so the caller can surface it.
+            if (event.type === 'message_end') {
+                debug('[Pi Provider] message_end:', event.message);
+                const error = this.extractErrorMessage(event.message);
+                if (error) {
+                    state.agentError = error;
+                }
+            }
+
+            // Pi executes its tools internally, so render tool activity as
+            // plain text. Do NOT emit LanguageModelToolCallPart: VS Code treats
+            // that as a tool call IT must fulfill, then re-invokes the provider
+            // to "continue" - which makes Pi rerun the whole turn in a loop.
+            if (event.type === 'tool_execution_start') {
+                debug('[Pi Provider] Tool execution start:', event.toolName);
+                state.reportedToolActivity = true;
+                const args = event.args && Object.keys(event.args).length > 0
+                    ? ' ' + JSON.stringify(event.args)
+                    : '';
+                progress.report(new vscode.LanguageModelTextPart(
+                    this.fenceBlock(`[${event.toolName}]${args}`)
+                ));
+            }
+
+            if (event.type === 'tool_execution_end') {
+                debug('[Pi Provider] Tool execution end:', event.toolName, event.isError ? 'error' : 'success');
+
+                if (event.result?.content && Array.isArray(event.result.content)) {
+                    const resultText = event.result.content
+                        .filter((c: any) => c.type === 'text')
+                        .map((c: any) => c.text)
+                        .join('\n');
+
+                    if (resultText) {
+                        state.reportedToolActivity = true;
+                        progress.report(new vscode.LanguageModelTextPart(
+                            this.fenceBlock(resultText)
+                        ));
+                    }
+                }
+            }
+        };
+
+        return { onEvent, state };
+    }
+
+    /**
+     * Wrap arbitrary text in a Markdown code fence. The fence is made longer
+     * than the longest backtick run in the content, so tool output or args
+     * that themselves contain ``` cannot break out of the block and inject
+     * Markdown/HTML into the chat view.
+     */
+    private fenceBlock(text: string): string {
+        const longestRun = (text.match(/`+/g) ?? [])
+            .reduce((max, run) => Math.max(max, run.length), 0);
+        const fence = '`'.repeat(Math.max(3, longestRun + 1));
+        return `\n${fence}\n${text}\n${fence}\n`;
+    }
+
+    /**
+     * If an assistant message ended in an error or abort, return its error
+     * text (or the stop reason) so it can be surfaced to the user.
+     */
+    private extractErrorMessage(message: unknown): string | undefined {
+        const msg = message as { role?: string; stopReason?: string; errorMessage?: string };
+        if (msg && msg.role === 'assistant' && (msg.stopReason === 'error' || msg.stopReason === 'aborted')) {
+            return msg.errorMessage || `stopReason: ${msg.stopReason}`;
         }
+        return undefined;
     }
 
     /**

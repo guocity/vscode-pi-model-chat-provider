@@ -7,7 +7,7 @@ import * as vscode from 'vscode';
 import { SessionPool } from './session-pool.js';
 import { PiChatProvider } from './provider.js';
 import type { PiConfig } from './types.js';
-import { debug } from './debug.js';
+import { debug, getOutputChannel } from './debug.js';
 
 let pool: SessionPool | undefined;
 
@@ -16,6 +16,9 @@ let pool: SessionPool | undefined;
  */
 export function activate(context: vscode.ExtensionContext): void {
     debug('Pi Language Model Provider extension activating...');
+
+    // Shared "Pi Agent" output channel — disposed with the extension.
+    context.subscriptions.push(getOutputChannel());
 
     // Load configuration
     const config = loadConfiguration();

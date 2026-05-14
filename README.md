@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/196cffa2-660e-4b7e-911b-389830420579
 
 1. **Pi CLI** must be installed and available in your PATH:
    ```bash
-   npm install -g @mariozechner/pi-coding-agent
+   npm install -g @earendil-works/pi-coding-agent
    ```
 
 2. **API Keys** configured via Pi:
@@ -77,8 +77,8 @@ const response = await model.sendRequest(messages, {}, token);
 
 - **Process Isolation**: Pi runs in a separate process for stability
 - **RPC Communication**: Uses Pi's RPC mode over stdin/stdout
-- **Fresh Sessions**: Each request starts a fresh session (MVP)
-- **Tool Handling**: Pi executes tools internally, only final text reaches VS Code
+- **Session Pooling**: Conversations are kept alive and reused across turns; idle sessions are cleaned up automatically
+- **Tool Handling**: Pi executes tools internally
 
 ## Troubleshooting
 
@@ -88,7 +88,7 @@ Ensure Pi is installed and in your PATH:
 ```bash
 which pi
 # or
-npm install -g @mariozechner/pi-coding-agent
+npm install -g @earendil-works/pi-coding-agent
 ```
 
 ### Check Logs

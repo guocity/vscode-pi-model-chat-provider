@@ -6,7 +6,8 @@ import * as vscode from 'vscode';
 import { spawn, type ChildProcess } from 'child_process';
 import * as readline from 'readline';
 import type { PiConfig, SendPromptOptions } from './types.js';
-import type { AgentEvent } from '@mariozechner/pi-agent-core';
+import type { AgentEvent } from '@earendil-works/pi-agent-core';
+import { getOutputChannel, debug } from './debug.js';
 
 interface RpcResponse {
     type: 'response';
@@ -32,9 +33,11 @@ export class PiBridge {
     private restartAttempts = 0;
     private isShuttingDown = false;
     private stderr = '';
+    private currentModelKey: string | null = null;  // `${provider}/${modelId}` last set on this process
 
     constructor(private config: PiConfig) {
-        this.outputChannel = vscode.window.createOutputChannel('Pi Agent');
+        // Shared channel — every bridge logs to the same "Pi Agent" output.
+        this.outputChannel = getOutputChannel();
     }
 
     /**
@@ -127,10 +130,21 @@ export class PiBridge {
                 return;
             }
 
-            // Handle events (AgentEvent) - anything that's not a response
+            // Extension UI requests: the agent blocks on confirm/select/input/
+            // editor until the client replies, so handle them here instead of
+            // forwarding them as events.
+            if (msg && typeof msg === 'object' && msg.type === 'extension_ui_request') {
+                this.handleExtensionUIRequest(msg);
+                return;
+            }
+
+            // Handle events (AgentEvent) - anything that's not a response.
+            // The channel is user-facing, so keep the always-on trace readable
+            // (just the type); the full payload goes behind the debug flag.
             if (msg && typeof msg === 'object' && 'type' in msg) {
                 const event = msg as AgentEvent;
                 this.outputChannel.appendLine(`[RPC Event] ${event.type}`);
+                debug(`[RPC Event] ${line}`);
                 for (const listener of this.eventListeners) {
                     listener(event);
                 }
@@ -139,6 +153,68 @@ export class PiBridge {
             this.outputChannel.appendLine(`Failed to parse RPC message: ${line}`);
             this.outputChannel.appendLine(`Error: ${error instanceof Error ? error.message : String(error)}`);
         }
+    }
+
+    /**
+     * Handle an extension UI request so the agent never blocks waiting on a
+     * dialog.
+     *
+     * - confirm: surfaced as a real modal Allow/Deny dialog - the agent is
+     *   genuinely blocked, so the user must decide (e.g. running a command).
+     * - select/input/editor: cancelled (we have no meaningful value to supply,
+     *   equivalent to the user dismissing the dialog).
+     * - notify/setStatus/setWidget/setTitle/set_editor_text: fire-and-forget,
+     *   no response expected.
+     */
+    private handleExtensionUIRequest(request: {
+        id: string;
+        method: string;
+        title?: string;
+        message?: string;
+    }): void {
+        const { id, method } = request;
+        this.outputChannel.appendLine(`[RPC Event] extension_ui_request (${method})`);
+
+        if (method === 'confirm') {
+            void this.promptConfirm(request);
+            return;
+        }
+
+        if (method === 'select' || method === 'input' || method === 'editor') {
+            this.sendExtensionUIResponse({ type: 'extension_ui_response', id, cancelled: true });
+        }
+        // Everything else is a fire-and-forget UI update - no response expected.
+    }
+
+    /**
+     * Show a modal Allow/Deny dialog for a `confirm` request and reply with the
+     * user's choice. Dismissing the dialog counts as Deny.
+     */
+    private async promptConfirm(request: {
+        id: string;
+        title?: string;
+        message?: string;
+    }): Promise<void> {
+        const choice = await vscode.window.showWarningMessage(
+            request.title || 'Pi agent wants to perform an action',
+            { modal: true, detail: request.message },
+            'Allow',
+            'Deny'
+        );
+        this.sendExtensionUIResponse({
+            type: 'extension_ui_response',
+            id: request.id,
+            confirmed: choice === 'Allow'
+        });
+    }
+
+    /**
+     * Write an extension UI response back to the agent over stdin.
+     */
+    private sendExtensionUIResponse(response: Record<string, unknown>): void {
+        const payload = JSON.stringify(response) + '\n';
+        this.outputChannel.appendLine(`[RPC Send] ${payload.trim()}`);
+        this.process?.stdin?.write(payload);
     }
 
     /**
@@ -198,21 +274,25 @@ export class PiBridge {
     async sendPrompt(options: SendPromptOptions): Promise<void> {
         await this.ensureStarted();
 
-        this.outputChannel.appendLine(`[sendPrompt] Setting model: ${options.model.provider}/${options.model.modelId}`);
-
-        // Set the model
-        try {
-            const setModelCmd = {
-                provider: options.model.provider,
-                modelId: options.model.modelId,  // Correct parameter name
-            };
-            this.outputChannel.appendLine(`[sendPrompt] Sending set_model command: ${JSON.stringify(setModelCmd)}`);
-            await this.send('set_model', setModelCmd);
-            this.outputChannel.appendLine(`[sendPrompt] Model set successfully`);
-        } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            this.outputChannel.appendLine(`Failed to set model: ${errorMessage}`);
-            throw new Error(`Model ${options.model.provider}/${options.model.modelId} not available. ${errorMessage}`);
+        // Set the model - but only when it actually changed. The model is a
+        // process-level setting that survives across turns, so re-sending it
+        // every turn is a wasted RPC round-trip on the hot path.
+        const modelKey = `${options.model.provider}/${options.model.modelId}`;
+        if (this.currentModelKey !== modelKey) {
+            try {
+                const setModelCmd = {
+                    provider: options.model.provider,
+                    modelId: options.model.modelId,
+                };
+                this.outputChannel.appendLine(`[sendPrompt] Sending set_model command: ${JSON.stringify(setModelCmd)}`);
+                await this.send('set_model', setModelCmd);
+                this.currentModelKey = modelKey;
+                this.outputChannel.appendLine(`[sendPrompt] Model set successfully`);
+            } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                this.outputChannel.appendLine(`Failed to set model: ${errorMessage}`);
+                throw new Error(`Model ${modelKey} not available. ${errorMessage}`);
+            }
         }
 
         // Subscribe to events
@@ -339,6 +419,29 @@ export class PiBridge {
     }
 
     /**
+     * Get the text of the last assistant message. This is the model-agnostic
+     * way to retrieve a turn's answer - it does not depend on how a particular
+     * model structures its streamed content blocks.
+     */
+    async getLastAssistantText(): Promise<string | null> {
+        await this.ensureStarted();
+        try {
+            const response = await this.send('get_last_assistant_text');
+            const text = response && typeof response === 'object'
+                ? (response as { text?: string | null }).text ?? null
+                : null;
+            this.outputChannel.appendLine(
+                `[getLastAssistantText] ${text ? `${text.length} chars` : 'null'}`
+            );
+            return text;
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.outputChannel.appendLine(`Failed to get last assistant text: ${errorMessage}`);
+            return null;
+        }
+    }
+
+    /**
      * Get available models from Pi
      */
     async getAvailableModels(): Promise<any[]> {
@@ -421,6 +524,7 @@ export class PiBridge {
         this.pendingRequests.clear();
         this.eventListeners = [];
         this.stderr = '';
+        this.currentModelKey = null;  // process is gone; the model must be re-set
     }
 
     /**
@@ -465,6 +569,6 @@ export class PiBridge {
         this.shutdown().catch(() => {
             // Ignore errors during disposal
         });
-        this.outputChannel.dispose();
+        // outputChannel is shared across bridges — do not dispose it here.
     }
 }

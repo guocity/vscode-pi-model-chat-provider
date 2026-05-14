@@ -20,9 +20,9 @@ export class SessionPool {
     private idleCheckInterval: NodeJS.Timeout | null = null;
     private statusBar: vscode.StatusBarItem | undefined;
     private statusBarHideTimer: NodeJS.Timeout | undefined;
-    private modelCache: any[] | null = null;  // Cache available models to avoid repeated Pi startups
+    private modelCache: any[] | null = null;  // Short-lived cache of available models
+    private modelCacheTime = 0;  // Timestamp of the last successful model query
     private metadataBridge: PiBridge | null = null;  // Persistent bridge for model enumeration
-    private pendingContext: string = '';  // Store context-only messages to prepend to next query
 
     constructor(
         private config: PiConfig,
@@ -36,7 +36,7 @@ export class SessionPool {
     async getOrCreate(
         messages: readonly vscode.LanguageModelChatRequestMessage[],
         modelId: string
-    ): Promise<{ bridge: PiBridge; isNew: boolean; newMessages: string[] }> {
+    ): Promise<{ bridge: PiBridge; isNew: boolean; newPrompt: string }> {
         debug('[SessionPool] ========================================');
         debug('[SessionPool] getOrCreate called with:', {
             totalMessages: messages.length,
@@ -80,18 +80,18 @@ export class SessionPool {
         });
 
         const existing = this.sessions.get(historyHash);
-        
+
         if (existing && userMessages.length > existing.messageCount) {
-            // Continuation: same history, new user message appended
+            // Continuation: same history, new user message appended.
+            // Pi already holds the prior conversation, so send only the new turn.
             debug('[SessionPool] ✓ CONTINUATION detected:', {
                 existingMessageCount: existing.messageCount,
-                currentMessageCount: userMessages.length,
-                willSendMessages: 1
+                currentMessageCount: userMessages.length
             });
 
             existing.messageCount = userMessages.length;
             existing.lastActivity = Date.now();
-            
+
             // Update hash to include the new message for next turn
             const updatedHash = this.computeHistoryHash(userMessages, modelId);
             if (updatedHash !== historyHash) {
@@ -99,20 +99,19 @@ export class SessionPool {
                 this.sessions.set(updatedHash, existing);
                 debug('[SessionPool] Session hash updated:', historyHash, '->', updatedHash);
             }
-            
+
             return {
                 bridge: existing.bridge,
                 isNew: false,
-                newMessages: [lastUserMsg]  // Only the new message
+                newPrompt: lastUserMsg
             };
         }
 
         // New conversation or history changed (edit, branch, etc.)
         debug('[SessionPool] ⭐ NEW SESSION will be created:', {
-            reason: existing 
-                ? `message count mismatch (existing: ${existing.messageCount}, current: ${userMessages.length})` 
-                : 'no existing session with this history',
-            willSendMessages: nonEmptyMessages.length
+            reason: existing
+                ? `message count mismatch (existing: ${existing.messageCount}, current: ${userMessages.length})`
+                : 'no existing session with this history'
         });
         // Check pool size and evict if needed
         if (this.sessions.size >= this.maxSessions) {
@@ -141,8 +140,10 @@ export class SessionPool {
             totalSessions: this.sessions.size
         });
 
-        // For new conversations, use all non-empty messages
-        return { bridge, isNew: true, newMessages: nonEmptyMessages };
+        // New session: VS Code may split one turn into several user messages
+        // (e.g. a context block followed by the actual request). Combine them
+        // into a single prompt so Pi sees one coherent turn.
+        return { bridge, isNew: true, newPrompt: nonEmptyMessages.join('\n\n') };
     }
 
     async updateStatusBar(bridge: PiBridge): Promise<void> {
@@ -286,7 +287,7 @@ export class SessionPool {
 
     private extractText(message: vscode.LanguageModelChatRequestMessage): string {
         const textParts: string[] = [];
-        
+
         for (const part of message.content) {
             if (part instanceof vscode.LanguageModelTextPart) {
                 textParts.push(part.value);
@@ -299,53 +300,33 @@ export class SessionPool {
             return '';
         }
 
-        let fullText = textParts.join('\n');
-        
-        debug('[SessionPool] extractText - raw text:', {
+        // Use the full message text. Earlier versions gated on a literal
+        // <user_query> tag and dropped any message without it — but VS Code's
+        // prompt format varies by version, so untagged messages were silently
+        // discarded, producing "no response returned". Always forward the text.
+        const fullText = textParts.join('\n');
+
+        debug('[SessionPool] extractText:', {
             length: fullText.length,
             preview: fullText.substring(0, 500),
-            hasPromptTags: fullText.includes('<prompt>'),
             hasUserQueryTags: fullText.includes('<user_query>')
         });
-        
-        // VS Code sends messages in two formats:
-        // 1. Context-only: <environment_info>, <workspace_info> (no user query)
-        //    -> These are sent BEFORE the actual user message, just providing context
-        //    -> We should STORE these and prepend to the next message
-        // 2. With user query: <context>, <reminderInstructions>, <user_query>
-        //    -> This is the actual user question - send everything with prepended context
-        
-        // Check if this is a context-only message (no <user_query> tag)
-        if (!fullText.includes('<user_query>')) {
-            debug('[SessionPool] extractText - STORING context-only message for next query');
-            this.pendingContext = fullText;
-            return '';  // Return empty to filter out
-        }
-        
-        // Message has user_query - combine with any pending context
-        let finalMessage = fullText;
-        if (this.pendingContext) {
-            debug('[SessionPool] extractText - PREPENDING stored context to user query');
-            finalMessage = this.pendingContext + '\n' + fullText;
-            this.pendingContext = '';  // Clear after using
-        }
-        
-        debug('[SessionPool] extractText - sending full message to Pi:', {
-            length: finalMessage.length,
-            hasPendingContext: finalMessage !== fullText
-        });
-        return finalMessage;
+
+        return fullText;
     }
 
     async getAvailableModels(): Promise<any[]> {
-        // Return cached models if available
-        if (this.modelCache) {
+        // Serve from cache only briefly — long enough to coalesce the burst of
+        // calls VS Code makes when opening the model picker, short enough that
+        // models Pi gains or loses show up without a window reload.
+        const CACHE_TTL_MS = 30_000;
+        if (this.modelCache && Date.now() - this.modelCacheTime < CACHE_TTL_MS) {
             debug('[SessionPool] Returning cached models:', this.modelCache.length);
             return this.modelCache;
         }
 
-        debug('[SessionPool] No cache - querying Pi for models...');
-        
+        debug('[SessionPool] Querying Pi for models...');
+
         // Try to reuse an existing session's bridge to avoid creating a new Pi process
         const existingBridge = this.sessions.size > 0 
             ? Array.from(this.sessions.values())[0].bridge 
@@ -368,11 +349,11 @@ export class SessionPool {
         }
         
         const models = await bridge.getAvailableModels();
-        
-        // Cache the result
+
         this.modelCache = models;
+        this.modelCacheTime = Date.now();
         debug('[SessionPool] Models cached:', models.length);
-        
+
         return models;
     }
 

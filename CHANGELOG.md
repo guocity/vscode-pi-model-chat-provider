@@ -2,6 +2,37 @@
 
 All notable changes to the "vscode-pi-model-chat-provider" extension will be documented in this file.
 
+## [0.2.0] - 2026-05-14
+
+### Fixed
+- "Sorry, no response was returned" — fixed several root causes:
+  - Messages without a literal `<user_query>` tag were silently dropped; the
+    full message text is now always forwarded to Pi.
+  - Response text is now fetched via the `get_last_assistant_text` RPC command
+    instead of being reconstructed from streamed content blocks. This is
+    model-agnostic and works regardless of how a model (codex, reasoning, etc.)
+    structures its output.
+- The agent no longer hangs on `extension_ui_request` dialogs. `confirm`
+  requests are surfaced as a real modal Allow/Deny dialog; the rest are
+  answered or treated as fire-and-forget per the RPC protocol.
+- Pi agent errors (e.g. an unsupported model) are now surfaced in the chat
+  instead of a bare "no response returned".
+- Requesting a tool call no longer causes an infinite loop. Tool activity is
+  rendered as text instead of `LanguageModelToolCallPart`, which VS Code
+  treated as a call it had to fulfill — re-invoking the provider repeatedly.
+
+### Changed
+- Migrated to the renamed `@earendil-works/pi-coding-agent` package.
+- Each conversation turn is sent to Pi as a single combined prompt instead of
+  replaying messages individually.
+- Model list is cached for 30 seconds (was cached indefinitely), so models Pi
+  gains or loses appear without a window reload.
+- All logging now goes to a single shared "Pi Agent" output channel; the
+  always-on trace shows event types, and full event payloads are logged when
+  `pi.debug` is enabled.
+- Performance: the model is only re-set on the Pi process when it actually
+  changes, and the status bar refresh no longer blocks turn completion.
+
 ## [0.1.0] - 2026-02-12
 
 ### Added
